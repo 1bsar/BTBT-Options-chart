@@ -1,0 +1,188 @@
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+.wrap { padding: 1rem 0; font-family: var(--font-sans); }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-bottom: 1.25rem; }
+.card { background: var(--color-background-secondary); border-radius: var(--border-radius-md); padding: 0.75rem 1rem; }
+.card .lb { font-size: 11px; color: var(--color-text-secondary); margin-bottom: 3px; }
+.card .vl { font-size: 18px; font-weight: 500; color: var(--color-text-primary); }
+.card .sb { font-size: 10px; color: var(--color-text-tertiary); margin-top: 2px; }
+.section-label { font-size: 11px; color: var(--color-text-tertiary); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; margin-top: 1.25rem; }
+.size-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.size-row label { font-size: 12px; color: var(--color-text-secondary); min-width: 120px; }
+.size-row .readout { font-size: 14px; font-weight: 500; min-width: 80px; text-align: right; color: var(--color-text-primary); }
+.chart-wrap { position: relative; width: 100%; height: 320px; margin: 8px 0; }
+.note { font-size: 10px; color: var(--color-text-tertiary); margin-top: 8px; line-height: 1.5; }
+.up { color: #3B6D11; } .dn { color: #A32D2D; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 10px; font-size: 12px; color: var(--color-text-secondary); }
+.legend span { display: flex; align-items: center; gap: 5px; }
+.leg-box { width: 10px; height: 10px; border-radius: 2px; }
+</style>
+
+<div class="wrap">
+
+<div class="cards">
+  <div class="card"><div class="lb">Strike</div><div class="vl">$2.50</div><div class="sb">Call, exp May 22</div></div>
+  <div class="card"><div class="lb">Ask (what you pay)</div><div class="vl">$0.12</div><div class="sb">Per contract = $12</div></div>
+  <div class="card"><div class="lb">Breakeven at expiry</div><div class="vl">$2.62</div><div class="sb">Strike + premium</div></div>
+  <div class="card"><div class="lb">Delta</div><div class="vl">0.33</div><div class="sb">$0.33 gain per $1 move</div></div>
+  <div class="card"><div class="lb">IV</div><div class="vl">157%</div><div class="sb">High — catalyst priced in</div></div>
+  <div class="card"><div class="lb">Theta</div><div class="vl">-$0.0095</div><div class="sb">~$1/day per 100 contracts</div></div>
+</div>
+
+<div class="section-label">position size — drag to adjust contracts</div>
+<div class="size-row">
+  <label>Number of contracts</label>
+  <input type="range" id="contracts" min="1" max="50" step="1" value="20" style="flex:1;">
+  <span class="readout" id="contracts-out">20 contracts</span>
+</div>
+<div class="size-row">
+  <label>Total cost</label>
+  <span style="font-size:14px;font-weight:500;color:var(--color-text-primary);" id="total-cost">$240</span>
+  <span style="font-size:11px;color:var(--color-text-tertiary);margin-left:6px;">of your $700</span>
+  <span style="font-size:11px;font-weight:500;margin-left:6px;" id="pct-bankroll"></span>
+</div>
+
+<div class="section-label">payout at expiry vs BTBT price</div>
+<div class="legend">
+  <span><span class="leg-box" style="background:#378ADD;"></span>Profit / loss ($)</span>
+  <span><span class="leg-box" style="background:#E24B4A; opacity:0.5;"></span>Loss zone</span>
+  <span><span class="leg-box" style="background:#3B6D11; opacity:0.5;"></span>Profit zone</span>
+</div>
+<div class="chart-wrap"><canvas id="payoutChart" role="img" aria-label="Bar chart showing BTBT options payout at different stock prices from $1.80 to $4.50">Payout ranges from max loss at prices below $2.62 to large gains above $3.</canvas></div>
+
+<div class="section-label">scenario breakdown at current contract size</div>
+<div id="scenario-table" style="overflow-x:auto;"></div>
+
+<p class="note" style="margin-top:12px;">* Payout at expiry assumes intrinsic value only. Real exit before expiry will be higher due to remaining time value. IV crush post-earnings may reduce option value even if BTBT moves up — consider selling before or at open on May 14. Not financial advice.</p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const STRIKE = 2.50;
+const PREMIUM = 0.12;
+const BREAKEVEN = STRIKE + PREMIUM;
+
+const SCENARIOS = [
+  { label: 'Goes to zero / stays flat', price: 1.80, note: 'Full loss' },
+  { label: 'Slight dip', price: 2.00, note: 'Full loss' },
+  { label: 'Breakeven', price: 2.62, note: 'Get money back' },
+  { label: 'Base move', price: 2.78, note: 'NAV at ATH, 30% disc' },
+  { label: 'Bull', price: 3.00, note: 'Strong earnings + hype' },
+  { label: 'Strong bull', price: 3.50, note: 'Discount compresses' },
+  { label: 'ATH territory', price: 4.00, note: 'Everything goes right' },
+  { label: 'Moonshot', price: 4.50, note: 'Full re-rating' },
+];
+
+let contracts = 20;
+let chart;
+
+function pnl(price, n) {
+  const intrinsic = Math.max(0, price - STRIKE);
+  return (intrinsic - PREMIUM) * 100 * n;
+}
+
+function fmt(n) { return (n >= 0 ? '+$' : '-$') + Math.abs(n).toLocaleString('en-US', {minimumFractionDigits:0, maximumFractionDigits:0}); }
+function fmtPct(n) { return (n >= 0 ? '+' : '') + n.toFixed(1) + '%'; }
+
+function updateCost() {
+  const cost = contracts * PREMIUM * 100;
+  document.getElementById('total-cost').textContent = '$' + cost.toFixed(0);
+  const pct = (cost / 700 * 100).toFixed(0);
+  const el = document.getElementById('pct-bankroll');
+  el.textContent = '(' + pct + '% of $700)';
+  el.style.color = pct > 50 ? '#A32D2D' : pct > 35 ? '#BA7517' : '#3B6D11';
+  document.getElementById('contracts-out').textContent = contracts + ' contracts';
+}
+
+function buildChart() {
+  const prices = [];
+  for (let p = 1.80; p <= 4.55; p += 0.10) prices.push(parseFloat(p.toFixed(2)));
+
+  const data = prices.map(p => parseFloat(pnl(p, contracts).toFixed(0)));
+  const colors = data.map(v => v >= 0 ? '#378ADD' : '#E24B4A');
+
+  if (chart) {
+    chart.data.datasets[0].data = data;
+    chart.data.datasets[0].backgroundColor = colors;
+    chart.update('none');
+    return;
+  }
+
+  chart = new Chart(document.getElementById('payoutChart'), {
+    type: 'bar',
+    data: {
+      labels: prices.map(p => '$' + p.toFixed(2)),
+      datasets: [{
+        data,
+        backgroundColor: colors,
+        borderRadius: 3,
+        barPercentage: 0.9,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const v = ctx.parsed.y;
+              return ' ' + (v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString() + ' P&L';
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { font: { size: 9 }, autoSkip: false, maxRotation: 45 },
+          grid: { display: false }
+        },
+        y: {
+          ticks: {
+            callback: v => (v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString(),
+            font: { size: 10 }
+          },
+          grid: { color: 'rgba(128,128,128,0.1)' }
+        }
+      }
+    }
+  });
+}
+
+function buildTable() {
+  const cost = contracts * PREMIUM * 100;
+  let html = '<table style="width:100%;font-size:11px;border-collapse:collapse;">';
+  html += '<thead><tr style="border-bottom:0.5px solid var(--color-border-tertiary);">';
+  html += '<th style="text-align:left;padding:5px 8px;color:var(--color-text-secondary);">Scenario</th>';
+  html += '<th style="text-align:center;padding:5px 6px;color:var(--color-text-secondary);">BTBT price</th>';
+  html += '<th style="text-align:center;padding:5px 6px;color:var(--color-text-secondary);">P&L</th>';
+  html += '<th style="text-align:center;padding:5px 6px;color:var(--color-text-secondary);">Return on premium</th>';
+  html += '<th style="text-align:left;padding:5px 6px;color:var(--color-text-secondary);">Context</th>';
+  html += '</tr></thead><tbody>';
+  SCENARIOS.forEach(s => {
+    const pl = pnl(s.price, contracts);
+    const ret = (pl / cost * 100);
+    const col = pl >= 0 ? '#3B6D11' : '#A32D2D';
+    html += `<tr style="border-bottom:0.5px solid var(--color-border-tertiary);">`;
+    html += `<td style="padding:5px 8px;color:var(--color-text-primary);">${s.label}</td>`;
+    html += `<td style="text-align:center;padding:5px 6px;color:var(--color-text-primary);font-weight:500;">$${s.price.toFixed(2)}</td>`;
+    html += `<td style="text-align:center;padding:5px 6px;color:${col};font-weight:500;">${fmt(pl)}</td>`;
+    html += `<td style="text-align:center;padding:5px 6px;color:${col};font-weight:500;">${fmtPct(ret)}</td>`;
+    html += `<td style="padding:5px 6px;color:var(--color-text-secondary);">${s.note}</td>`;
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('scenario-table').innerHTML = html;
+}
+
+function updateAll() { updateCost(); buildChart(); buildTable(); }
+
+document.getElementById('contracts').addEventListener('input', e => {
+  contracts = parseInt(e.target.value);
+  updateAll();
+});
+
+updateAll();
+</script>
